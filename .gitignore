@@ -1,0 +1,25 @@
+node_modules
+.vscode
+.DS_Store
+output.yaml
+samconfig.toml
+
+
+*.DS_Store
+
+#SAM
+.aws-sam/*
+
+#IntelliJ
+.idea/*
+*.iml
+
+node_modules/*
+package-lock.json
+
+dist/*
+
+#VS Code
+.vscode
+
+venv/*

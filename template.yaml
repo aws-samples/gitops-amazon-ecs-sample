@@ -1,0 +1,524 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  AWS SAM template to setup Git driven deployment to ECS.
+  This template creates AWS resources and related resources.
+  You will be billed for the AWS resources used if you create a stack from this template.
+
+Parameters:
+
+  LogLevel:
+    Type: String
+    Description: Log level passed to Lambda python code
+    Default: debug
+
+  LogRetentionDate:
+    Type: Number
+    Description: Number of days Logs will be retained
+    Default: 7
+
+Transform:
+  - AWS::Serverless-2016-10-31
+
+Resources:
+
+  DeploymentNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub deployment-notification-topic-${AWS::StackName}
+      TopicName: !Sub deployment-notification-topic-${AWS::StackName}
+
+  # Role used by Step Function to do ECS Deployment, can be created in different account to do cross account deployment
+  EcsDeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ecs-deployment-role-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:root
+      Path: /
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - ecs:DescribeTaskDefinition
+                  - ecs:RegisterTaskDefinition
+                  - ecs:ListTaskDefinition
+                  - ecs:DescribeTasks
+                  - ecs:ListTasks
+                Effect: Allow
+                Resource:
+                  - '*'
+              - Action:
+                  - ecs:DescribeServices
+                  - ecs:UpdateServices
+                  - ecs:UpdateService
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service/*
+              - Action:
+                  - events:ListTargetsByRule
+                  - events:PutTargets
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/*
+              - Action:
+                  - iam:PassRole
+                Effect: Allow
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      - events.amazonaws.com
+                      - ecs-tasks.amazonaws.com
+          PolicyName: !Sub ecs-deployment-policy-${AWS::StackName}
+
+  InitConfigFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${InitConfigFunction}
+      RetentionInDays: !Ref LogRetentionDate
+
+  InitConfigFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Initializes and Validates the deployment.json file
+      CodeUri: src/init/
+      Handler: lambda.handler
+      MemorySize: 256
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          REGION: !Ref AWS::Region
+          ACCOUNT_ID: !Ref AWS::AccountId
+          ECS_DEPLOYMENT_ROLE_ARN: !GetAtt EcsDeploymentRole.Arn
+      Policies:
+        - CloudWatchLogsFullAccess
+      Runtime: python3.8
+      Timeout: 300
+
+  DeployTaskFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${DeployTaskFunction}
+      RetentionInDays: !Ref LogRetentionDate
+
+  DeployTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Performs deployment of scheduled tasks
+      CodeUri: src/task/
+      Handler: lambda.handler
+      MemorySize: 256
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          REGION: !Ref AWS::Region
+          ACCOUNT_ID: !Ref AWS::AccountId
+      Policies:
+        - CloudWatchLogsFullAccess
+        - Statement:
+            - Sid: AssumeDeployRole
+              Effect: Allow
+              Action:
+                - sts:AssumeRole
+              Resource: !GetAtt EcsDeploymentRole.Arn
+      Runtime: python3.8
+      Timeout: 300
+
+  DeployEcsFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${DeployEcsFunction}
+      RetentionInDays: !Ref LogRetentionDate
+
+  DeployEcsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Performs ECS rolling deployment
+      CodeUri: src/deploy/
+      Handler: lambda.handler
+      MemorySize: 256
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          REGION: !Ref AWS::Region
+          ACCOUNT_ID: !Ref AWS::AccountId
+      Policies:
+        - CloudWatchLogsFullAccess
+        - Statement:
+            - Sid: AssumeDeployRole
+              Effect: Allow
+              Action:
+                - sts:AssumeRole
+              Resource: !GetAtt EcsDeploymentRole.Arn
+      Runtime: python3.8
+      Timeout: 300
+
+  ValidateDeployFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ValidateDeployFunction}
+      RetentionInDays: !Ref LogRetentionDate
+
+  ValidateDeployFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Validates if a succesful ECS rolling deployment has happened
+      CodeUri: src/validate/
+      Handler: lambda.handler
+      MemorySize: 256
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          REGION: !Ref AWS::Region
+          ACCOUNT_ID: !Ref AWS::AccountId
+      Policies:
+        - CloudWatchLogsFullAccess
+        - Statement:
+            - Sid: AssumeDeployRole
+              Effect: Allow
+              Action:
+                - sts:AssumeRole
+              Resource: !GetAtt EcsDeploymentRole.Arn
+      Runtime: python3.8
+      Timeout: 300
+
+  StateMachinesLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDate
+
+  MultiServiceDeployerStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Definition:
+        StartAt: InitConfig
+        States:
+          InitConfig:
+            Type: Task
+            Resource: !GetAtt InitConfigFunction.Arn
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                IntervalSeconds: 180
+                BackoffRate: 2
+                MaxAttempts: 1
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: SendErrorToSns
+            Next: ChooseTaskOrService
+          ChooseTaskOrService:
+            Type: Choice
+            Choices:
+              - Variable: "$.tasks"
+                IsPresent: true
+                Next: ProcessTasks
+              - Variable: "$.tasks"
+                IsPresent: false
+                Next: ProcessServices
+          ProcessTasks:
+            Type: Map
+            InputPath: $
+            ItemsPath: $.tasks
+            MaxConcurrency: 0 #https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-map-state.html
+            Iterator:
+              StartAt: DeployTasks
+              States:
+                DeployTasks:
+                  Type: Task
+                  Resource: !GetAtt DeployTaskFunction.Arn
+                  Retry:
+                    - ErrorEquals:
+                        - States.TaskFailed
+                      IntervalSeconds: 120
+                      BackoffRate: 2
+                      MaxAttempts: 1
+                  End: true
+            ResultPath: $.tasks
+            Next: ProcessServices
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: SendErrorToSns
+          ProcessServices:
+            Type: Map
+            InputPath: $
+            ItemsPath: $.services
+            MaxConcurrency: 0 #https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-map-state.html
+            Iterator:
+              StartAt: DeployEcs
+              States:
+                DeployEcs:
+                  Type: Task
+                  Resource: !GetAtt DeployEcsFunction.Arn
+                  Retry:
+                    - ErrorEquals:
+                        - States.TaskFailed
+                      IntervalSeconds: 120
+                      BackoffRate: 2
+                      MaxAttempts: 1
+                  Next: WaitForDeployment
+                WaitForDeployment:
+                  Type: Wait
+                  Seconds: 300 # https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-wait-state.html
+                  Next: ValidateDeploy
+                ValidateDeploy:
+                  Type: Task
+                  Resource: !GetAtt ValidateDeployFunction.Arn
+                  Retry:
+                    - ErrorEquals:
+                        - States.TaskFailed
+                      IntervalSeconds: 180
+                      BackoffRate: 3
+                      MaxAttempts: 3
+                  End: true
+            ResultPath: $.services
+            Next: SendSuccessToSns
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: SendErrorToSns
+          SendSuccessToSns:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              TopicArn: !Ref DeploymentNotificationTopic
+              Subject: Deployment Success
+              Message.$: $
+            Next: Success
+          Success:
+            Type: Pass
+            End: true
+          SendErrorToSns:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              TopicArn: !Ref DeploymentNotificationTopic
+              Subject: '[ERROR]: Deployment Failed'
+              Message:
+                Alarm: Deployment Failed for statemachine
+                Error.$: $.Cause
+            Next: Failure
+          Failure:
+            Type: Fail
+            Cause: $.Cause
+            Error: $.Error
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachinesLogGroup.Arn
+        IncludeExecutionData: false
+        Level: ERROR
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref InitConfigFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref DeployTaskFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref DeployEcsFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ValidateDeployFunction
+        - CloudWatchLogsFullAccess
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt DeploymentNotificationTopic.TopicName
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub artifact-bucket-${AWS::StackName}
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub codebuild-policy-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+              - Resource: !Sub arn:aws:s3:::${ArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub codepipeline-role-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub codepipeline-policy-${AWS::StackName}
+          PolicyDocument:
+            Statement:
+              - Resource:
+                  - !Sub arn:aws:s3:::${ArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+              - Effect: Allow
+                Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:UploadArchive
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:CancelUploadArchive
+                Resource:
+                  - !GetAtt CodeCommit.Arn
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !GetAtt CodeBuildProject.Arn
+              - Effect: Allow
+                Action:
+                  - states:DescribeStateMachine
+                  - states:StartExecution
+                  - states:StopExecution
+                  - states:DescribeExecution
+                  - states:ListActivities
+                  - states:ListExecutions
+                  - states:SendTaskSuccess
+                  - states:SendTaskFailure
+                Resource:
+                  - !Sub
+                    - arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:${Param}:*
+                    - Param: !GetAtt MultiServiceDeployerStateMachine.Name
+                  - !Sub
+                    - arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${Param}
+                    - Param: !GetAtt MultiServiceDeployerStateMachine.Name
+                  - !Sub
+                    - arn:aws:states:${AWS::Region}:${AWS::AccountId}:activity:${Param}*
+                    - Param: !GetAtt MultiServiceDeployerStateMachine.Name
+
+  CodeCommit:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryDescription: ECS deployment config repo
+      RepositoryName: !Sub config-repo-${AWS::StackName}
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Description: Converts deployment.yaml to deployment.json
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - wget https://github.com/mikefarah/yq/releases/download/v4.16.2/yq_linux_386 -O /usr/bin/yq &&  chmod +x /usr/bin/yq
+            build:
+              commands:
+                - echo "Converting yaml to json"
+                - cat deployment.yaml
+                - yq eval -o=j -I=0 deployment.yaml > deployment.json
+          artifacts:
+            files: deployment.json
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image:  aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+      Name: !Sub codebuild-${AWS::StackName}
+      ServiceRole: !Ref CodeBuildServiceRole
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: "1"
+              Configuration:
+                RepositoryName: !GetAtt CodeCommit.Name
+                BranchName: main
+              OutputArtifacts:
+                - Name: SourceCode
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: "1"
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceCode
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: InvokeStepFunction
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Version: "1"
+                Provider: StepFunctions
+              Configuration:
+                StateMachineArn: !Ref MultiServiceDeployerStateMachine
+                InputType: FilePath
+                Input: deployment.json
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+
+Outputs:
+  CodeCommitName:
+    Description: ECS deployment config repo name
+    Value: !GetAtt CodeCommit.Name
+  CodeCommitArn:
+    Description: ECS deployment config repo arn
+    Value: !GetAtt CodeCommit.Arn

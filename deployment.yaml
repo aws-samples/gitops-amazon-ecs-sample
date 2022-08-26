@@ -1,0 +1,29 @@
+release: 4.0
+# tasks - (optional) if no scheduled tasks exists just remove the tasks array
+tasks:
+  #service - must match the task's container name in the task definition
+  - service: service-x
+    # cwRuleName - Name of the cloudwatch events rule associated with the ECS service name .
+    cwRuleName: resmed-test-ratings-maintenance
+    # image - New image that you want to deploy.
+    image: "11111111111.dkr.ecr.us-west-2.amazonaws.com/service-x:2.0.0"
+  - service: service-y
+    cwRuleName: service-y-cw-rule
+    image: "11111111111.dkr.ecr.us-west-2.amazonaws.com/service-y:4.0.0"
+services:
+  #service - must match the container name in the task definition
+  - service: service-a
+    # clusterName - Name of the ECS cluster where the service exists
+    clusterName: demo
+    # serviceName - Name of the ECS service
+    serviceName: demo-service-a-TS6BT1U6VQBG-Service-HTco3SKTy2J1
+    # image - New image that you want to deploy.
+    image: "11111111111.dkr.ecr.us-east-1.amazonaws.com/service-a:2.0.0"
+  - service: service-b
+    clusterName: demo
+    serviceName: demo-service-b-1OP5GR8JWHKX7-Service-ExB0A5Jxcnv2
+    image: "11111111111.dkr.ecr.us-east-1.amazonaws.com/service-b:3.0.0"
+  - service: service-c
+    clusterName: demo
+    serviceName: demo-service-c-1OP5GR8JWHKX7-Service-ExB0A5Jxcnv2
+    image: "11111111111.dkr.ecr.us-east-1.amazonaws.com/service-c:6.0.0"
