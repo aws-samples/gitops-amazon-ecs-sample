@@ -1,7 +1,7 @@
 release: 4.0
 # tasks - (optional) if no scheduled tasks exists just remove the tasks array
 tasks:
-  #service - must match the task's container name in the task definition
+    #service - must match the task's container name in the task definition
   - service: service-x
     # cwRuleName - Name of the cloudwatch events rule associated with the ECS service name .
     cwRuleName: service-y-cw-rule
