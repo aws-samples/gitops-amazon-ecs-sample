@@ -4,7 +4,7 @@ tasks:
     #service - must match the task's container name in the task definition
   - service: service-x
     # cwRuleName - Name of the cloudwatch events rule associated with the ECS service name .
-    cwRuleName: service-y-cw-rule
+    cwRuleName: service-x-cw-rule
     # image - New image that you want to deploy.
     image: "11111111111.dkr.ecr.us-west-2.amazonaws.com/service-x:2.0.0"
   - service: service-y
