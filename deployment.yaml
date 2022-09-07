@@ -11,7 +11,7 @@ tasks:
     cwRuleName: service-y-cw-rule
     image: "11111111111.dkr.ecr.us-west-2.amazonaws.com/service-y:4.0.0"
 services:
-  #service - must match the container name in the task definition
+    #service - must match the container name in the task definition
   - service: service-a
     # clusterName - Name of the ECS cluster where the service exists
     clusterName: demo
